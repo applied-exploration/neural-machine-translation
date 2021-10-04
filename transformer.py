@@ -147,7 +147,7 @@ train_iterator, valid_iterator, test_iterator = BucketIterator.splits(
 class Encoder(nn.Module):
     def __init__(self, 
                  input_dim, 
-                 hid_dim, 
+                 single_hid_dim, 
                  n_layers, 
                  n_heads, 
                  pf_dim,
@@ -156,11 +156,26 @@ class Encoder(nn.Module):
                  max_length = 100):
         super().__init__()
 
-        pass
+        self.tok_embedding = nn.Embedding(input_dim, single_hid_dim * n_heads)
+        self.pos_embedding = nn.Embedding(max_length, single_hid_dim * n_heads)
+
+        self.encoder_layers = nn.ModuleList([EncoderLayer(single_hid_dim, n_heads, pf_dim, dropout, device) for n in range(n_layers)])
+        self.scale = 1 / torch.sqrt(torch.FloatTensor([self.single_hid_dim])).to(device)
+
         
     def forward(self, src, src_mask):
+        batch_size = src.shape[0]
+        src_len = src.shape[1]
+
+        pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
         
-        pass
+        x = self.pos_embedding(pos) + (self.tok_embedding(src) * self.scale)
+        x = self.dropout(x)
+        
+        for layer in self.encoder_layers:
+            x = layer(x, src_mask)
+    
+        return x
 
 # %% [markdown]
 # ### Encoder Layer
@@ -174,18 +189,24 @@ class Encoder(nn.Module):
 # %%
 class EncoderLayer(nn.Module):
     def __init__(self, 
-                 hid_dim, 
+                 single_hid_dim, 
                  n_heads, 
                  pf_dim,  
                  dropout, 
                  device):
         super().__init__()
         
-        pass
+        self.multi_head_attention = MultiHeadAttentionLayer(single_hid_dim, n_heads, dropout, device)
+        self.feed_forward = PositionWiseFeedForwardLayer(single_hid_dim, pf_dim, dropout)
+        self.norm = nn.LayerNorm(single_hid_dim * n_heads)
+
         
     def forward(self, src, src_mask):
-        
-        pass
+        x, _ = self.multi_head_attention(src, src, src, src_mask)
+        x = self.norm(x + self.dropout(src))
+        x = self.feed_forward(x)
+        x = self.norm(x + self.dropout(src))
+        return x
 
 # %% [markdown]
 # ### Mutli Head Attention Layer
@@ -218,10 +239,11 @@ class EncoderLayer(nn.Module):
 
 # %%
 
-class QKVSelfAttentionLayer(nn.Module):
+class MultiHeadAttentionLayer(nn.Module):
     def __init__(self, single_hid_dim, n_heads, dropout, device):
         super().__init__()
         
+        self.n_heads = n_heads
         self.hid_dim = single_hid_dim * n_heads
         self.dropout = nn.Dropout(p= dropout)
         self.query = nn.Linear(self.hid_dim, self.hid_dim)
@@ -229,39 +251,35 @@ class QKVSelfAttentionLayer(nn.Module):
         self.value = nn.Linear(self.hid_dim, self.hid_dim)
         self.fc = nn.Linear(self.hid_dim, self.hid_dim)
         self.device = device
-        self.scale = torch.sqrt(torch.FloatTensor([self.single_hid_dim])).to(device)
+        self.scale = 1 / torch.sqrt(torch.FloatTensor([self.single_hid_dim])).to(device)
 
 
-    def forward(self, q, k, v, input, mask = None):
+    def forward(self, q, k, v, mask = None):
         batch_size = input.shape[0]
 
-        Q = self.query(input).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        K = self.key(input).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        V = self.value(input).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        Q = self.query(q).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        K = self.key(k).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        V = self.value(v).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
 
         energy = torch.matmul(Q, K.permute(0, 1, 3, 2)) / self.scale
 
         if mask is not None:
             energy = energy.masked_fill(mask == 0, -1e10)
 
-        attention = torch.softmax(energy / self.scale, dim = -1)
+        attention = torch.softmax(energy * self.scale, dim = -1)
         attention = self.dropout(attention)
 
         x = torch.matmul(attention, V)
-        x = self.fc(x)
+        #x = [batch size, n heads, query len, head dim]
+        x = x.permute(0, 2, 1, 3).contiguous()
+        
+        #x = [batch size, query len, n heads, head dim]
+        x = x.view(batch_size, -1, self.hid_dim)
 
+        x = self.fc(x)
+    
         return x, attention
 
-
-class MultiHeadAttentionLayer(nn.Module):
-    def __init__(self, hid_dim, n_heads, dropout, device):
-        super().__init__()
-        
-
-
-    def forward(self, query, key, value, mask = None):
-
-        
  
 
 
@@ -278,11 +296,15 @@ class MultiHeadAttentionLayer(nn.Module):
 class PositionwiseFeedforwardLayer(nn.Module):
     def __init__(self, hid_dim, pf_dim, dropout):
         super().__init__()
-        
-        pass
+        self.fc1 = nn.Linear(hid_dim, pf_dim)
+        self.fc2 = nn.Linear(pf_dim, hid_dim)
+        self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
-        pass
+        x = self.fc1(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
 
 # %% [markdown]
 # ### Decoder
