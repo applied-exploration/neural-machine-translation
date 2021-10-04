@@ -1,5 +1,6 @@
 # To add a new cell, type '# %%'
 # To add a new markdown cell, type '# %% [markdown]'
+
 # %% [markdown]
 # # 6 - Attention is All You Need
 # 
@@ -216,15 +217,53 @@ class EncoderLayer(nn.Module):
 # One thing that looks strange at first is that dropout is applied directly to the attention. This means that our attention vector will most probably not sum to 1 and we may pay full attention to a token but the attention over that token is set to 0 by dropout. This is never explained, or even mentioned, in the paper however is used by the [official implementation](https://github.com/tensorflow/tensor2tensor/) and every Transformer implementation since, [including BERT](https://github.com/google-research/bert/).
 
 # %%
+
+class QKVSelfAttentionLayer(nn.Module):
+    def __init__(self, single_hid_dim, n_heads, dropout, device):
+        super().__init__()
+        
+        self.hid_dim = single_hid_dim * n_heads
+        self.dropout = nn.Dropout(p= dropout)
+        self.query = nn.Linear(self.hid_dim, self.hid_dim)
+        self.key = nn.Linear(self.hid_dim, self.hid_dim)
+        self.value = nn.Linear(self.hid_dim, self.hid_dim)
+        self.fc = nn.Linear(self.hid_dim, self.hid_dim)
+        self.device = device
+        self.scale = torch.sqrt(torch.FloatTensor([self.single_hid_dim])).to(device)
+
+
+    def forward(self, q, k, v, input, mask = None):
+        batch_size = input.shape[0]
+
+        Q = self.query(input).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        K = self.key(input).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        V = self.value(input).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        energy = torch.matmul(Q, K.permute(0, 1, 3, 2)) / self.scale
+
+        if mask is not None:
+            energy = energy.masked_fill(mask == 0, -1e10)
+
+        attention = torch.softmax(energy / self.scale, dim = -1)
+        attention = self.dropout(attention)
+
+        x = torch.matmul(attention, V)
+        x = self.fc(x)
+
+        return x, attention
+
+
 class MultiHeadAttentionLayer(nn.Module):
     def __init__(self, hid_dim, n_heads, dropout, device):
         super().__init__()
         
-        pass
-        
+
+
     def forward(self, query, key, value, mask = None):
-        pass
+
+        
  
+
 
 # %% [markdown]
 # ### Position-wise Feedforward Layer
@@ -311,9 +350,9 @@ class DecoderLayer(nn.Module):
         pass
 
 # %% [markdown]
-# ### Seq2Seq
+# ### Transformer
 # 
-# Finally, we have the `Seq2Seq` module which encapsulates the encoder and decoder, as well as handling the creation of the masks.
+# Finally, we have the `Transformer` module which encapsulates the encoder and decoder, as well as handling the creation of the masks.
 # 
 # The source mask is created by checking where the source sequence is not equal to a `<pad>` token. It is 1 where the token is not a `<pad>` token and 0 when it is. It is then unsqueezed so it can be correctly broadcast when applying the mask to the `energy`, which of shape **_[batch size, n heads, seq len, seq len]_**.
 # 
