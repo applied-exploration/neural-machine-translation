@@ -160,7 +160,9 @@ class Encoder(nn.Module):
         self.pos_embedding = nn.Embedding(max_length, single_hid_dim * n_heads)
 
         self.encoder_layers = nn.ModuleList([EncoderLayer(single_hid_dim, n_heads, pf_dim, dropout, device) for n in range(n_layers)])
-        self.scale = 1 / torch.sqrt(torch.FloatTensor([self.single_hid_dim])).to(device)
+        self.scale = torch.sqrt(torch.FloatTensor([single_hid_dim])).to(device)
+        self.device = device
+        self.dropout = nn.Dropout(dropout)
 
         
     def forward(self, src, src_mask):
@@ -175,6 +177,29 @@ class Encoder(nn.Module):
         for layer in self.encoder_layers:
             x = layer(x, src_mask)
     
+        return x
+
+# %% [markdown]
+# ### Position-wise Feedforward Layer
+# 
+# The other main block inside the encoder layer is the *position-wise feedforward layer* This is relatively simple compared to the multi-head attention layer. The input is transformed from `hid_dim` to `pf_dim`, where `pf_dim` is usually a lot larger than `hid_dim`. The original Transformer used a `hid_dim` of 512 and a `pf_dim` of 2048. The ReLU activation function and dropout are applied before it is transformed back into a `hid_dim` representation. 
+# 
+# Why is this used? Unfortunately, it is never explained in the paper.
+# 
+# BERT uses the [GELU](https://arxiv.org/abs/1606.08415) activation function, which can be used by simply switching `torch.relu` for `F.gelu`. Why did they use GELU? Again, it is never explained.
+
+# %%
+class PositionwiseFeedforwardLayer(nn.Module):
+    def __init__(self, hid_dim, pf_dim, dropout):
+        super().__init__()
+        self.fc1 = nn.Linear(hid_dim, pf_dim)
+        self.fc2 = nn.Linear(pf_dim, hid_dim)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
         return x
 
 # %% [markdown]
@@ -197,9 +222,9 @@ class EncoderLayer(nn.Module):
         super().__init__()
         
         self.multi_head_attention = MultiHeadAttentionLayer(single_hid_dim, n_heads, dropout, device)
-        self.feed_forward = PositionWiseFeedForwardLayer(single_hid_dim, pf_dim, dropout)
+        self.feed_forward = PositionwiseFeedforwardLayer(single_hid_dim, pf_dim, dropout)
         self.norm = nn.LayerNorm(single_hid_dim * n_heads)
-
+        self.dropout = nn.Dropout(dropout)
         
     def forward(self, src, src_mask):
         x, _ = self.multi_head_attention(src, src, src, src_mask)
@@ -244,6 +269,7 @@ class MultiHeadAttentionLayer(nn.Module):
         super().__init__()
         
         self.n_heads = n_heads
+        self.single_hid_dim = single_hid_dim
         self.hid_dim = single_hid_dim * n_heads
         self.dropout = nn.Dropout(p= dropout)
         self.query = nn.Linear(self.hid_dim, self.hid_dim)
@@ -251,22 +277,22 @@ class MultiHeadAttentionLayer(nn.Module):
         self.value = nn.Linear(self.hid_dim, self.hid_dim)
         self.fc = nn.Linear(self.hid_dim, self.hid_dim)
         self.device = device
-        self.scale = 1 / torch.sqrt(torch.FloatTensor([self.single_hid_dim])).to(device)
+        self.scale = torch.sqrt(torch.FloatTensor([single_hid_dim])).to(device)
 
 
     def forward(self, q, k, v, mask = None):
-        batch_size = input.shape[0]
+        batch_size = q.shape[0]
 
-        Q = self.query(q).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        K = self.key(k).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        V = self.value(v).view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        Q = self.query(q).view(batch_size, -1, self.n_heads, self.single_hid_dim).permute(0, 2, 1, 3)
+        K = self.key(k).view(batch_size, -1, self.n_heads, self.single_hid_dim).permute(0, 2, 1, 3)
+        V = self.value(v).view(batch_size, -1, self.n_heads, self.single_hid_dim).permute(0, 2, 1, 3)
 
         energy = torch.matmul(Q, K.permute(0, 1, 3, 2)) / self.scale
 
         if mask is not None:
             energy = energy.masked_fill(mask == 0, -1e10)
 
-        attention = torch.softmax(energy * self.scale, dim = -1)
+        attention = torch.softmax(energy, dim = -1)
         attention = self.dropout(attention)
 
         x = torch.matmul(attention, V)
@@ -283,28 +309,7 @@ class MultiHeadAttentionLayer(nn.Module):
  
 
 
-# %% [markdown]
-# ### Position-wise Feedforward Layer
-# 
-# The other main block inside the encoder layer is the *position-wise feedforward layer* This is relatively simple compared to the multi-head attention layer. The input is transformed from `hid_dim` to `pf_dim`, where `pf_dim` is usually a lot larger than `hid_dim`. The original Transformer used a `hid_dim` of 512 and a `pf_dim` of 2048. The ReLU activation function and dropout are applied before it is transformed back into a `hid_dim` representation. 
-# 
-# Why is this used? Unfortunately, it is never explained in the paper.
-# 
-# BERT uses the [GELU](https://arxiv.org/abs/1606.08415) activation function, which can be used by simply switching `torch.relu` for `F.gelu`. Why did they use GELU? Again, it is never explained.
 
-# %%
-class PositionwiseFeedforwardLayer(nn.Module):
-    def __init__(self, hid_dim, pf_dim, dropout):
-        super().__init__()
-        self.fc1 = nn.Linear(hid_dim, pf_dim)
-        self.fc2 = nn.Linear(pf_dim, hid_dim)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        return x
 
 # %% [markdown]
 # ### Decoder
@@ -329,7 +334,7 @@ class PositionwiseFeedforwardLayer(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, 
                  output_dim, 
-                 hid_dim, 
+                 single_hid_dim, 
                  n_layers, 
                  n_heads, 
                  pf_dim, 
@@ -337,11 +342,33 @@ class Decoder(nn.Module):
                  device,
                  max_length = 100):
         super().__init__()
-        pass
-        
+
+        self.tok_embedding = nn.Embedding(output_dim, single_hid_dim * n_heads)
+        self.pos_embedding = nn.Embedding(max_length, single_hid_dim * n_heads)
+
+        self.decoder_layers = nn.ModuleList([DecoderLayer(single_hid_dim, n_heads, pf_dim, dropout, device) for n in range(n_layers)])
+        self.fc = nn.Linear(n_heads * single_hid_dim, output_dim)
+        self.scale = torch.sqrt(torch.FloatTensor([single_hid_dim])).to(device)        
+        self.device = device
+
     def forward(self, trg, enc_src, trg_mask, src_mask):
+        batch_size = trg.shape[0]
+        trg_len = trg.shape[1]
+
+        pos = torch.arange(0, trg_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
         
-        pass
+        trg = self.pos_embedding(pos) + (self.tok_embedding(trg) * self.scale)
+        trg = self.dropout(trg)
+
+        for layer in self.decoder_layers:
+            trg, attention = layer(trg, enc_src, trg_mask, src_mask)
+
+        output = self.fc(trg)
+
+        return output, attention
+
+        
+        
 
 # %% [markdown]
 # ### Decoder Layer
@@ -359,17 +386,34 @@ class Decoder(nn.Module):
 # %%
 class DecoderLayer(nn.Module):
     def __init__(self, 
-                 hid_dim, 
+                 single_hid_dim, 
                  n_heads, 
                  pf_dim, 
                  dropout, 
                  device):
         super().__init__()
-        
+        self.masked_multi_head_attention = MultiHeadAttentionLayer(single_hid_dim, n_heads, dropout, device)
+        self.norm_1 = nn.LayerNorm(single_hid_dim * n_heads)
+
+        self.encoder_multi_head_attention = MultiHeadAttentionLayer(single_hid_dim, n_heads, dropout, device)
+        self.norm_2 = nn.LayerNorm(single_hid_dim * n_heads)
+
+        self.feed_forward = PositionwiseFeedforwardLayer(single_hid_dim * n_heads, pf_dim, dropout)
+        self.norm_3 = nn.LayerNorm(single_hid_dim * n_heads)
+        self.dropout = nn.Dropout(dropout)
         
     def forward(self, trg, enc_src, trg_mask, src_mask):
-        
-        pass
+        masked_m_head_att_output = self.masked_multi_head_attention(trg, trg, trg, trg_mask)
+        masked_m_head_att_output = self.dropout(self.norm_1(masked_m_head_att_output + trg))
+
+        enc_m_head_att_output = self.encoder_multi_head_attention(masked_m_head_att_output, enc_src, enc_src, src_mask)
+        enc_m_head_att_output = self.dropout(self.norm_2(masked_m_head_att_output + enc_m_head_att_output))
+
+        ff_output = self.feed_forward(enc_m_head_att_output)
+        ff_output = self.dropout(self.norm_3(ff_output + enc_m_head_att_output))
+
+        return ff_output
+
 
 # %% [markdown]
 # ### Transformer
@@ -419,14 +463,44 @@ class Transformer(nn.Module):
         self.device = device
         
     def make_src_mask(self, src):
-        pass
+        
+        #src = [batch size, src len]
+        src_mask = (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2)
+
+        #src_mask = [batch size, 1, 1, src len]
+        return src_mask
     
     def make_trg_mask(self, trg):
-        pass
+        #trg = [batch size, trg len]
+        trg_pad_mask = (trg != self.trg_pad_idx).unsqueeze(1).unsqueeze(2)
+        #trg_pad_mask = [batch size, 1, 1, trg len]
+        trg_len = trg.shape[1]
+        trg_sub_mask = torch.tril(torch.ones((trg_len, trg_len), device = self.device)).bool()
+        #trg_sub_mask = [trg len, trg len]
+        trg_mask = trg_pad_mask & trg_sub_mask
+        #trg_mask = [batch size, 1, trg len, trg len]
+        
+        return trg_mask
 
 
     def forward(self, src, trg):
-        pass
+        #src = [batch size, src len]
+        #trg = [batch size, trg len]
+        src_mask = self.make_src_mask(src)
+        #src_mask = [batch size, 1, 1, src len]
+        trg_mask = self.make_trg_mask(trg)
+        #trg_mask = [batch size, 1, trg len, trg len]
+        
+        enc_src = self.encoder(src, src_mask)
+        #enc_src = [batch size, src len, hid dim]
+        
+        output, attention = self.decoder(trg, enc_src, trg_mask, src_mask)
+        #output = [batch size, trg len, output dim]
+        #attention = [batch size, n heads, trg len, src len]
+        
+        return output, attention
+        
+        
 
 
 # %% [markdown]
