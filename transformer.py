@@ -48,7 +48,6 @@ import random
 import math
 import time
 
-
 # %%
 SEED = 1234
 
@@ -64,6 +63,7 @@ torch.backends.cudnn.deterministic = True
 # %%
 spacy_de = spacy.load('de_core_news_sm')
 spacy_en = spacy.load('en_core_web_sm')
+
 
 
 # %%
@@ -112,6 +112,7 @@ TRG.build_vocab(train_data, min_freq = 2)
 
 # %%
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# device = torch.device('cpu')
 
 
 # %%
@@ -222,15 +223,16 @@ class EncoderLayer(nn.Module):
         super().__init__()
         
         self.multi_head_attention = MultiHeadAttentionLayer(single_hid_dim, n_heads, dropout, device)
-        self.feed_forward = PositionwiseFeedforwardLayer(single_hid_dim, pf_dim, dropout)
+        self.feed_forward = PositionwiseFeedforwardLayer(single_hid_dim * n_heads, pf_dim, dropout)
         self.norm = nn.LayerNorm(single_hid_dim * n_heads)
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, src, src_mask):
-        m_head_ttn_output, _ = self.multi_head_attention(src, src, src, src_mask)
-        m_head_ttn_output = self.norm(m_head_ttn_output + self.dropout(src))
-        ff_output = self.feed_forward(m_head_ttn_output)
-        ff_output = self.norm(ff_output + self.dropout(m_head_ttn_output))
+        print(f"{src.shape =}")
+        m_head_output, _ = self.multi_head_attention(src, src, src, src_mask)
+        src_and_m_head_output = self.norm(src + self.dropout(m_head_output))
+        ff_output = self.feed_forward(src_and_m_head_output)
+        ff_output = self.norm(src_and_m_head_output + self.dropout(ff_output))
         return ff_output
 
 # %% [markdown]
@@ -350,6 +352,7 @@ class Decoder(nn.Module):
         self.fc = nn.Linear(n_heads * single_hid_dim, output_dim)
         self.scale = torch.sqrt(torch.FloatTensor([single_hid_dim])).to(device)        
         self.device = device
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
         batch_size = trg.shape[0]
@@ -403,16 +406,16 @@ class DecoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, trg, enc_src, trg_mask, src_mask):
-        masked_m_head_att_output = self.masked_multi_head_attention(trg, trg, trg, trg_mask)
-        masked_m_head_att_output = self.dropout(self.norm_1(masked_m_head_att_output + trg))
+        masked_att, _ = self.masked_multi_head_attention(trg, trg, trg, trg_mask)
+        normal_masked_att = self.norm_1(self.dropout(masked_att) + trg)
 
-        enc_m_head_att_output = self.encoder_multi_head_attention(masked_m_head_att_output, enc_src, enc_src, src_mask)
-        enc_m_head_att_output = self.dropout(self.norm_2(masked_m_head_att_output + enc_m_head_att_output))
+        enc_att, attention = self.encoder_multi_head_attention(normal_masked_att, enc_src, enc_src, src_mask)
+        normal_enc_att = self.norm_2(self.dropout(enc_att) + normal_masked_att)
 
-        ff_output = self.feed_forward(enc_m_head_att_output)
-        ff_output = self.dropout(self.norm_3(ff_output + enc_m_head_att_output))
+        ff = self.feed_forward(normal_enc_att)
+        normal_ff = self.norm_3(self.dropout(ff) + normal_enc_att)
 
-        return ff_output
+        return normal_ff, attention
 
 
 # %% [markdown]
