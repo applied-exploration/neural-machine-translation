@@ -228,7 +228,7 @@ class EncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, src, src_mask):
-        print(f"{src.shape =}")
+
         m_head_output, _ = self.multi_head_attention(src, src, src, src_mask)
         src_and_m_head_output = self.norm(src + self.dropout(m_head_output))
         ff_output = self.feed_forward(src_and_m_head_output)
